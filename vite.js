@@ -15,20 +15,49 @@ const attachWebSocketServer = () => {
   /** @type {import('vite').Logger} */
   let logger
 
-  // TODO: Get from kit.config.hooks.server
-  // TODO: Handle TS files
-  const hooksFilename = 'src/hooks.server.js'
+  /**
+   * Gets the hooks file path from SvelteKit configuration
+   * @param {string} root - Root directory
+   * @returns {string | null} - Hooks file path or null if not found
+   */
+  async function getHooksFilename(root) {
+    try {
+      const configPath = path.join(root, 'svelte.config.js')
+      if (fs.existsSync(configPath)) {
+        const config = await import(/* @vite-ignore */ configPath + `?t=${Date.now()}`)
+        const hooksPath = config.default?.kit?.files?.hooks?.server
+        
+        if (hooksPath && fs.existsSync(path.join(root, hooksPath))) {
+          return hooksPath
+        }
+      }
+    } catch (error) {
+      // Fallback to automatic detection
+    }
+
+    // Fallback to default locations
+    const tsHooks = 'src/hooks.server.ts'
+    const jsHooks = 'src/hooks.server.js'
+    
+    if (fs.existsSync(path.join(root, tsHooks))) {
+      return tsHooks
+    }
+    if (fs.existsSync(path.join(root, jsHooks))) {
+      return jsHooks
+    }
+    return null
+  }
 
   /**
-   * Creates a new WebSocketServer and loads the hooks file if available.
-   *
+   * Creates a new WebSocketServer and loads the hooks file if available
    * @param {import('vite').HttpServer} httpServer
    */
   async function createWebSocketServer(httpServer) {
     const wss = new WebSocketServer({ noServer: true })
 
-    // Skip connection handling if the file does not exists
-    if (!fs.existsSync(path.join(root, hooksFilename))) {
+    const hooksFilename = await getHooksFilename(root)
+
+    if (!hooksFilename) {
       return wss
     }
 
@@ -47,12 +76,11 @@ const attachWebSocketServer = () => {
       // TODO: Get protocol
       const address = httpServer.address()
       if (address && typeof address === 'object') {
-        const host = address.address === '::' ? 'localhost' : address.address
+        const host = address.address.startsWith('::') ? 'localhost' : address.address
         const port = address.port
         url = new URL(`ws://${host}:${port}`)
       }
 
-      // Add request path to url
       if (url && req.url) {
         url.pathname = req.url
       }
@@ -109,9 +137,10 @@ const attachWebSocketServer = () => {
       server.httpServer?.on('close', () => wss?.close())
     },
 
-    // On HMR, close all the websocket connections and create a new server
     async handleHotUpdate({ file, server }) {
-      if (path.relative(root, file) === hooksFilename) {
+      const hooksFilename = await getHooksFilename(root)
+
+      if (hooksFilename && path.relative(root, file) === hooksFilename) {
         logger.info(
           colors.green(`${hooksFilename} changed, restarting server...`),
           {
