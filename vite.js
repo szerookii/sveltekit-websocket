@@ -6,154 +6,157 @@ import { WebSocketServer } from 'ws'
 
 /** @returns {import('vite').Plugin} */
 const attachWebSocketServer = () => {
-  /** @type {WebSocketServer} */
-  let wss
+ /** @type {WebSocketServer} */
+ let wss
 
-  /** @type {string} */
-  let root
+ /** @type {string} */
+ let root
 
-  /** @type {import('vite').Logger} */
-  let logger
+ /** @type {import('vite').Logger} */
+ let logger
 
-  /**
-   * Gets the hooks file path from SvelteKit configuration
-   * @param {string} root - Root directory
-   * @returns {string | null} - Hooks file path or null if not found
-   */
-  async function getHooksFilename(root) {
-    try {
-      const configPath = path.join(root, 'svelte.config.js')
-      if (fs.existsSync(configPath)) {
-        const config = await import(/* @vite-ignore */ configPath + `?t=${Date.now()}`)
-        const hooksPath = config.default?.kit?.files?.hooks?.server
-        
-        if (hooksPath && fs.existsSync(path.join(root, hooksPath))) {
-          return hooksPath
-        }
-      }
-    } catch (error) {
-      // Fallback to automatic detection
-    }
+ /** @type {import('vite').ViteDevServer | null} */
+ let viteServer = null
 
-    // Fallback to default locations
-    const tsHooks = 'src/hooks.server.ts'
-    const jsHooks = 'src/hooks.server.js'
-    
-    if (fs.existsSync(path.join(root, tsHooks))) {
-      return tsHooks
-    }
-    if (fs.existsSync(path.join(root, jsHooks))) {
-      return jsHooks
-    }
-    return null
-  }
+ /**
+  * Gets the hooks file path from SvelteKit configuration
+  * @param {string} root - Root directory
+  * @returns {string | null} - Hooks file path or null if not found
+  */
+ async function getHooksFilename(root) {
+   try {
+     const configPath = path.join(root, 'svelte.config.js')
+     if (fs.existsSync(configPath)) {
+       const config = await import(/* @vite-ignore */ `file://${configPath}?t=${Date.now()}`)
+       const hooksPath = config.default?.kit?.files?.hooks?.server
+       
+       if (hooksPath && fs.existsSync(path.join(root, hooksPath))) {
+         return hooksPath
+       }
+     }
+   } catch (error) {
+     // Fallback to automatic detection
+   }
 
-  /**
-   * Creates a new WebSocketServer and loads the hooks file if available
-   * @param {import('vite').HttpServer} httpServer
-   */
-  async function createWebSocketServer(httpServer) {
-    const wss = new WebSocketServer({ noServer: true })
+   // Fallback to default locations
+   const tsHooks = 'src/hooks.server.ts'
+   const jsHooks = 'src/hooks.server.js'
+   
+   if (fs.existsSync(path.join(root, tsHooks))) {
+     return tsHooks
+   }
+   if (fs.existsSync(path.join(root, jsHooks))) {
+     return jsHooks
+   }
+   return null
+ }
 
-    const hooksFilename = await getHooksFilename(root)
+ /**
+  * Creates a new WebSocketServer and loads the hooks file if available
+  * @param {import('vite').HttpServer} httpServer
+  */
+ async function createWebSocketServer(httpServer) {
+   const wss = new WebSocketServer({ noServer: true })
 
-    if (!hooksFilename) {
-      return wss
-    }
+   const hooksFilename = await getHooksFilename(root)
 
-    /**
-     * @type {Partial<{
-     *   handleWebsocket: import('./index.js').HandleWebsocket
-     * }>}
-     */
-    const hooks = await import(
-      /* @vite-ignore */ path.join(root, hooksFilename) + `?t=${Date.now()}`
-    )
+   if (!hooksFilename) {
+     return wss
+   }
 
-    wss.on('connection', (socket, req) => {
-      let url
+   /**
+    * @type {Partial<{
+    *   handleWebsocket: import('./index.js').HandleWebsocket
+    * }>}
+    */
+   const hooks = await (viteServer?.ssrLoadModule(hooksFilename) ?? 
+     import(/* @vite-ignore */ `file://${path.resolve(root, hooksFilename)}?t=${Date.now()}`))
 
-      // TODO: Get protocol
-      const address = httpServer.address()
-      if (address && typeof address === 'object') {
-        const host = address.address.startsWith('::') ? 'localhost' : address.address
-        const port = address.port
-        url = new URL(`ws://${host}:${port}`)
-      }
+   wss.on('connection', (socket, req) => {
+     let url
 
-      if (url && req.url) {
-        url.pathname = req.url
-      }
+     // TODO: Get protocol
+     const address = httpServer.address()
+     if (address && typeof address === 'object') {
+       const host = address.address.startsWith('::') ? 'localhost' : address.address
+       const port = address.port
+       url = new URL(`ws://${host}:${port}`)
+     }
 
-      // TODO: A locals object could be passed through all the subroutes rooms?
-      // TODO: Expose a limited API for socket and server
-      hooks.handleWebsocket?.({
-        server: wss,
-        socket: socket,
-        request: {
-          url: Object.freeze(url),
-        },
-      })
+     if (url && req.url) {
+       url.pathname = req.url
+     }
 
-      // TODO: Get the route from the request so we can handle scoped events
-      //  Fetch the +websocket.js file and handle route events
-    })
+     // TODO: A locals object could be passed through all the subroutes rooms?
+     // TODO: Expose a limited API for socket and server
+     hooks.handleWebsocket?.({
+       server: wss,
+       socket: socket,
+       request: {
+         url: Object.freeze(url),
+       },
+     })
 
-    return wss
-  }
+     // TODO: Get the route from the request so we can handle scoped events
+     //  Fetch the +websocket.js file and handle route events
+   })
 
-  return {
-    name: '@ubermanu/sveltekit-websocket',
+   return wss
+ }
 
-    configResolved(config) {
-      root = config.root
-      logger = config.logger
-    },
+ return {
+   name: '@ubermanu/sveltekit-websocket',
 
-    async configureServer(server) {
-      wss = await createWebSocketServer(server.httpServer)
+   configResolved(config) {
+     root = config.root
+     logger = config.logger
+   },
 
-      server.httpServer?.on('upgrade', (req, socket, head) => {
-        if (req.headers['sec-websocket-protocol'] === 'vite-hmr') {
-          return
-        }
-        wss?.handleUpgrade(req, socket, head, (socket, req) => {
-          wss.emit('connection', socket, req)
-        })
-      })
+   async configureServer(server) {
+     viteServer = server
+     wss = await createWebSocketServer(server.httpServer)
 
-      server.httpServer?.on('close', () => wss?.close())
-    },
+     server.httpServer?.on('upgrade', (req, socket, head) => {
+       if (req.headers['sec-websocket-protocol'] === 'vite-hmr') {
+         return
+       }
+       wss?.handleUpgrade(req, socket, head, (socket, req) => {
+         wss.emit('connection', socket, req)
+       })
+     })
 
-    async configurePreviewServer(server) {
-      wss = await createWebSocketServer(server.httpServer)
+     server.httpServer?.on('close', () => wss?.close())
+   },
 
-      server.httpServer?.on('upgrade', (req, socket, head) => {
-        wss?.handleUpgrade(req, socket, head, (socket, req) => {
-          wss.emit('connection', socket, req)
-        })
-      })
+   async configurePreviewServer(server) {
+     wss = await createWebSocketServer(server.httpServer)
 
-      server.httpServer?.on('close', () => wss?.close())
-    },
+     server.httpServer?.on('upgrade', (req, socket, head) => {
+       wss?.handleUpgrade(req, socket, head, (socket, req) => {
+         wss.emit('connection', socket, req)
+       })
+     })
 
-    async handleHotUpdate({ file, server }) {
-      const hooksFilename = await getHooksFilename(root)
+     server.httpServer?.on('close', () => wss?.close())
+   },
 
-      if (hooksFilename && path.relative(root, file) === hooksFilename) {
-        logger.info(
-          colors.green(`${hooksFilename} changed, restarting server...`),
-          {
-            timestamp: true,
-            clear: true,
-          }
-        )
+   async handleHotUpdate({ file, server }) {
+     const hooksFilename = await getHooksFilename(root)
 
-        wss?.close()
-        wss = await createWebSocketServer(server.httpServer)
-      }
-    },
-  }
+     if (hooksFilename && path.relative(root, file) === hooksFilename) {
+       logger.info(
+         colors.green(`${hooksFilename} changed, restarting server...`),
+         {
+           timestamp: true,
+           clear: true,
+         }
+       )
+
+       wss?.close()
+       wss = await createWebSocketServer(server.httpServer)
+     }
+   },
+ }
 }
 
 export { attachWebSocketServer as websocket }
